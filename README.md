@@ -1,19 +1,19 @@
 # Postit Board
 
-A single-page idea board with hand-tracking interactions.
+손동작 인터랙션이 들어간 단일 페이지 아이디어 보드.
 
-→ **Live**: <https://724ch.github.io/postit-tool/>
-→ **Case study**: <https://724ch.github.io/postit-tool/case-study.html>
+→ **바로 써보기**: <https://724ch.github.io/postit-tool/>
+→ **케이스 스터디**: <https://724ch.github.io/postit-tool/case-study.html>
 
-## Usage
+## 사용법
 
-- Click anywhere on the canvas → start typing a note
-- Drag notes to move · double-click to edit · ⌘Z to undo
-- Shift+click two notes → connect (or disconnect)
-- `Hand` button → camera-based hand tracking (right hand grabs, left hand modifies)
-- Drop or `⌘V` an image → image note
+- 캔버스 아무 곳이나 클릭 → 바로 입력
+- 노트 어디든 드래그로 이동 · 더블클릭으로 텍스트 편집 · ⌘Z로 되돌리기
+- Shift+클릭으로 두 노트 연결 (같은 쌍을 다시 누르면 해제)
+- `Hand` 버튼 → 카메라 손동작 인식. 오른손=조작, 왼손=보조 modifier(핀·팬·연결)
+- 이미지 파일을 드롭하거나 ⌘V로 붙여넣기 → 이미지 노트
 
-## Stack
+## 스택
 
-Vanilla JS · D3.js (tree layout) · MediaPipe Hands · Pretendard · localStorage.
-No build step, no framework — single HTML + CSS.
+Vanilla JS · D3.js(트리 레이아웃) · MediaPipe Hands · Pretendard · localStorage.
+빌드 도구 없음, 프레임워크 없음 — HTML + CSS 두 파일.
