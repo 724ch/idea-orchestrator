@@ -1,0 +1,1983 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Postit Board — idea organizer</title>
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="toolbar">
+    <h1>Postit Board</h1>
+    <span class="sub">idea organizer</span>
+    <div class="seg" id="mode-seg">
+      <button data-mode="network" class="active">Network</button>
+      <button data-mode="tree">Tree</button>
+    </div>
+    <span class="count" id="count">0 notes</span>
+    <span class="spacer"></span>
+    <div class="actions">
+      <button id="btn-hand" title="손동작 인식 (카메라)">Hand</button>
+      <button id="btn-export">Export</button>
+      <button id="btn-import">Import</button>
+      <button id="btn-clear" class="danger">Clear</button>
+    </div>
+  </header>
+
+  <main id="canvas">
+    <div id="world">
+      <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="notes"></div>
+    </div>
+    <div id="empty-hint">
+      <div class="big">Postit Board</div>
+      <div class="small">
+        캔버스 아무 곳이나 클릭 → 바로 입력<br/>
+        <kbd>Space</kbd> + 드래그 → 캔버스 이동 ·  휠 → 줌<br/>
+        포스트잇 어디든 드래그 → 이동 · 더블클릭 → 텍스트 편집 (Esc로 종료)<br/>
+        포스트잇 선택 후 <kbd>1</kbd>~<kbd>8</kbd> → 색 · <kbd>0</kbd> → 흰색 · 팔레트는 드래그로 순서 변경<br/>
+        <kbd>Shift</kbd> + 클릭 → 두 포스트잇 자동 연결 ·  <kbd>⌘Z</kbd> → 되돌리기<br/>
+        이미지 파일을 캔버스에 드롭하거나 <kbd>⌘V</kbd>로 붙여넣기 → 이미지 노트
+      </div>
+    </div>
+  </main>
+
+  <div id="palette"></div>
+
+  <footer class="chat">
+    <div class="input-wrap">
+      <span class="prompt">›</span>
+      <input
+        type="text"
+        class="chat-input"
+        id="chat-input"
+        placeholder="아이디어를 입력하고 Enter..."
+        autocomplete="off"
+      />
+      <span class="send-hint">↵</span>
+    </div>
+  </footer>
+
+  <!-- Zoom rail (right side) -->
+  <div class="zoom-rail" id="zoom-rail">
+    <button id="zoom-in" title="줌 인">+</button>
+    <input type="range" id="zoom-slider"
+           min="0.2" max="4" step="0.01" value="1"
+           orient="vertical" title="줌 비율">
+    <button id="zoom-out" title="줌 아웃">−</button>
+    <span class="zoom-label" id="zoom-label">100%</span>
+    <button id="zoom-fit" title="100% · 원점으로">⌂</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <input type="file" id="file-input" accept="application/json,image/*" multiple style="display:none">
+
+  <!-- Camera PIP for hand tracking -->
+  <div class="cam-pip hidden" id="cam-pip">
+    <video id="cam-video" playsinline autoplay muted></video>
+    <canvas id="cam-overlay"></canvas>
+    <div class="cam-modes" id="cam-modes">
+      <button data-cam-mode="move" class="active">Move</button>
+      <button data-cam-mode="draw">Draw</button>
+    </div>
+    <button class="cam-close" id="cam-close" title="끄기">×</button>
+    <div class="cam-status" id="cam-status">카메라 준비 중…</div>
+  </div>
+  <canvas id="trail-canvas"></canvas>
+  <div id="hand-cursors"></div>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script>
+  // ═══════════════════════════════════════════════════════════
+  //  Palette
+  // ═══════════════════════════════════════════════════════════
+  const PALETTE = [
+    { name: 'Canary',   hex: '#FFE872', meaning: '디폴트' },
+    { name: 'Coral',    hex: '#FF8C70', meaning: '긴급' },
+    { name: 'Mint',     hex: '#7FD1B9', meaning: '아이디어' },
+    { name: 'Lavender', hex: '#B8A4FF', meaning: '질문' },
+    { name: 'Sky',      hex: '#7EC8E3', meaning: '참고' },
+    { name: 'Sand',     hex: '#E0B889', meaning: '메모' },
+    { name: 'Sage',     hex: '#A9C46C', meaning: '완료' },
+    { name: 'Blush',    hex: '#FF9FB1', meaning: '직관' }
+  ];
+  const DEFAULT_COLOR = '#ffffff';
+
+  // ═══════════════════════════════════════════════════════════
+  //  State
+  // ═══════════════════════════════════════════════════════════
+  const state = {
+    notes: new Map(),          // id -> note
+    edges: new Set(),          // "fromId|toId" (sorted) for network mode
+    mode: 'network',           // 'network' | 'tree'
+    selectedId: null,
+    transform: { x: 0, y: 0, k: 1 },
+    sequence: 0,               // for today's ID counter
+    today: todayStamp(),
+    paletteOrder: [0, 1, 2, 3, 4, 5, 6, 7],   // user-reorderable mapping → PALETTE indices
+  };
+
+  function todayStamp() {
+    const d = new Date();
+    return `${String(d.getFullYear()).slice(2)}${pad(d.getMonth()+1)}${pad(d.getDate())}`;
+  }
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  function nextId() {
+    const t = todayStamp();
+    if (t !== state.today) { state.today = t; state.sequence = 0; }
+    // Find max existing sequence for today
+    let max = state.sequence;
+    for (const n of state.notes.values()) {
+      const m = n.id.match(/^z-(\d{6})-(\d{3})$/);
+      if (m && m[1] === t) max = Math.max(max, parseInt(m[2], 10));
+    }
+    state.sequence = max + 1;
+    return `z-${t}-${String(state.sequence).padStart(3, '0')}`;
+  }
+
+  // ── Undo history ──
+  const history = [];
+  const HISTORY_MAX = 50;
+  function snapshot() {
+    return JSON.stringify({
+      notes: Array.from(state.notes.values()),
+      edges: [...state.edges]
+    });
+  }
+  function pushHistory(snap) {
+    history.push(snap !== undefined ? snap : snapshot());
+    if (history.length > HISTORY_MAX) history.shift();
+  }
+  function undo() {
+    if (history.length === 0) { toast('되돌릴 항목이 없습니다'); return; }
+    const data = JSON.parse(history.pop());
+    state.notes = new Map(data.notes.map(n => [n.id, n]));
+    state.edges = new Set(data.edges);
+    if (state.selectedId && !state.notes.has(state.selectedId)) state.selectedId = null;
+    if (state.mode === 'tree') relayoutTree(false);
+    render();
+    save();
+    toast('되돌렸습니다');
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  DOM refs
+  // ═══════════════════════════════════════════════════════════
+  const canvasEl = document.getElementById('canvas');
+  const worldEl = document.getElementById('world');
+  const notesEl = document.getElementById('notes');
+  const edgesEl = document.getElementById('edges');
+  const chatInput = document.getElementById('chat-input');
+  const paletteEl = document.getElementById('palette');
+  const countEl = document.getElementById('count');
+  const toastEl = document.getElementById('toast');
+  const fileInput = document.getElementById('file-input');
+
+  // ═══════════════════════════════════════════════════════════
+  //  Palette popover (drag-to-reorder)
+  // ═══════════════════════════════════════════════════════════
+  const PALETTE_STORAGE_KEY = 'postit-board-palette-v1';
+
+  function loadPaletteOrder() {
+    try {
+      const raw = localStorage.getItem(PALETTE_STORAGE_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      const valid = Array.isArray(arr) &&
+        arr.length === PALETTE.length &&
+        arr.every(i => Number.isInteger(i) && i >= 0 && i < PALETTE.length) &&
+        new Set(arr).size === PALETTE.length;
+      if (valid) state.paletteOrder = arr;
+    } catch (e) {}
+  }
+  function savePaletteOrder() {
+    try {
+      localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(state.paletteOrder));
+    } catch (e) {}
+  }
+
+  function renderPalette() {
+    paletteEl.innerHTML = '';
+
+    state.paletteOrder.forEach((paletteIdx, slot) => {
+      const p = PALETTE[paletteIdx];
+      if (!p) return;
+      const btn = document.createElement('button');
+      btn.className = 'palette-btn';
+      btn.style.background = p.hex;
+      btn.dataset.color = p.hex;
+      btn.dataset.key = slot + 1;
+      btn.dataset.slot = slot;
+      btn.title = `${p.name} — ${p.meaning} · ${slot + 1} · 드래그로 순서 변경`;
+      btn.draggable = true;
+
+      btn.addEventListener('click', () => {
+        if (state.selectedId) {
+          const n = state.notes.get(state.selectedId);
+          if (n && n.color !== p.hex) {
+            pushHistory();
+            n.color = p.hex; render(); save();
+          }
+        }
+        updatePaletteActive();
+      });
+
+      btn.addEventListener('dragstart', (e) => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(slot));
+        btn.classList.add('dragging');
+      });
+      btn.addEventListener('dragend', () => {
+        btn.classList.remove('dragging');
+        paletteEl.querySelectorAll('.drop-target').forEach(b => b.classList.remove('drop-target'));
+      });
+      btn.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        btn.classList.add('drop-target');
+      });
+      btn.addEventListener('dragleave', () => {
+        btn.classList.remove('drop-target');
+      });
+      btn.addEventListener('drop', (e) => {
+        e.preventDefault();
+        btn.classList.remove('drop-target');
+        const fromSlot = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        const toSlot = slot;
+        if (isNaN(fromSlot) || fromSlot === toSlot) return;
+        const order = [...state.paletteOrder];
+        const [moved] = order.splice(fromSlot, 1);
+        order.splice(toSlot, 0, moved);
+        state.paletteOrder = order;
+        savePaletteOrder();
+        renderPalette();
+        updatePaletteActive();
+      });
+
+      paletteEl.appendChild(btn);
+    });
+
+    // Trailing reset chip — fixed at far right, not draggable. Key = 0.
+    const whiteBtn = document.createElement('button');
+    whiteBtn.className = 'palette-btn reset-chip';
+    whiteBtn.style.background = '#ffffff';
+    whiteBtn.dataset.color = '#ffffff';
+    whiteBtn.dataset.key = '0';
+    whiteBtn.title = '흰색 (기본) · 0';
+    whiteBtn.draggable = false;
+    whiteBtn.addEventListener('click', () => {
+      if (state.selectedId) {
+        const n = state.notes.get(state.selectedId);
+        if (n && n.color !== '#ffffff') {
+          pushHistory();
+          n.color = '#ffffff'; render(); save();
+        }
+      }
+      updatePaletteActive();
+    });
+    whiteBtn.addEventListener('dragover', (e) => { e.dataTransfer.dropEffect = 'none'; });
+    paletteEl.appendChild(whiteBtn);
+  }
+
+  function updatePaletteActive() {
+    const sel = state.selectedId ? state.notes.get(state.selectedId) : null;
+    paletteEl.querySelectorAll('button').forEach(b => {
+      b.classList.toggle('active', sel && b.dataset.color === sel.color);
+    });
+  }
+
+  loadPaletteOrder();
+  renderPalette();
+
+  // ═══════════════════════════════════════════════════════════
+  //  World transform (pan/zoom)
+  // ═══════════════════════════════════════════════════════════
+  function applyTransform() {
+    const t = state.transform;
+    worldEl.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
+    // grid follows pan
+    canvasEl.style.setProperty('--grid-x', `${t.x % (32 * t.k)}px`);
+    canvasEl.style.setProperty('--grid-y', `${t.y % (32 * t.k)}px`);
+    if (typeof updateZoomUI === 'function') updateZoomUI();
+  }
+
+  // ── Space-held pan mode ──
+  let spaceHeld = false;
+  let panState = null;
+
+  function isEditableTarget(el) {
+    if (!el) return false;
+    if (el === chatInput) return true;
+    if (el.classList && (el.classList.contains('text') || el.classList.contains('tags'))) return true;
+    if (el.isContentEditable) return true;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return true;
+    return false;
+  }
+
+  // Space starts pan when:
+  //   - nothing editable is focused, OR
+  //   - chatInput is focused but effectively empty (only whitespace), OR
+  //   - user explicitly forces pan with Shift+Space (escape hatch from any editable)
+  // Otherwise Space passes through as a normal space character.
+  function canStartPanFromSpace(e) {
+    if (e && e.shiftKey) return true; // Shift+Space = force pan from anywhere
+    const a = document.activeElement;
+    if (!isEditableTarget(a)) return true;
+    if (a === chatInput && chatInput.value.trim().length === 0) return true;
+    return false;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !spaceHeld && canStartPanFromSpace(e)) {
+      spaceHeld = true;
+      document.body.classList.add('pan-mode');
+      if (isEditableTarget(document.activeElement)) document.activeElement.blur();
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+      spaceHeld = false;
+      document.body.classList.remove('pan-mode');
+    }
+  });
+  window.addEventListener('blur', () => {
+    if (spaceHeld) {
+      spaceHeld = false;
+      document.body.classList.remove('pan-mode');
+    }
+  });
+
+  // Intercept mousedown in capture phase: Space-held OR left-fist (soft Space)
+  // → start pan, block others. Left-fist over a note falls through so the note
+  // handler can interpret the click as Shift-connect.
+  document.addEventListener('mousedown', (e) => {
+    const softSpace = handState.leftFistActive;
+    if (!spaceHeld && !softSpace) return;
+    if (e.target.closest('header.toolbar, footer.chat, #palette')) return;
+    // Soft Space: let the note handler treat the click as a connect gesture
+    if (softSpace && !spaceHeld && e.target.closest('.note')) return;
+    e.stopPropagation();
+    e.preventDefault();
+    panState = { x: e.clientX, y: e.clientY, tx: state.transform.x, ty: state.transform.y };
+    canvasEl.classList.add('panning');
+  }, true);
+
+  window.addEventListener('mousemove', (e) => {
+    if (!panState) return;
+    state.transform.x = panState.tx + (e.clientX - panState.x);
+    state.transform.y = panState.ty + (e.clientY - panState.y);
+    applyTransform();
+  });
+  window.addEventListener('mouseup', () => {
+    if (panState) {
+      panState = null;
+      canvasEl.classList.remove('panning');
+    }
+  });
+
+  // ── Canvas background click → deselect, focus chat input for instant typing.
+  // Space-collision is handled in keydown: empty chatInput + Space = pan.
+  canvasEl.addEventListener('mousedown', (e) => {
+    if (spaceHeld) return;
+    // Only fires on actual background (notes stop propagation)
+    if (e.target !== canvasEl && e.target !== worldEl &&
+        !e.target.matches('#edges, #edges *, #empty-hint, #empty-hint *')) return;
+    state.selectedId = null;
+    document.querySelectorAll('.note.selected').forEach(n => n.classList.remove('selected'));
+    paletteEl.classList.remove('visible');
+  });
+  canvasEl.addEventListener('click', (e) => {
+    if (spaceHeld) return;
+    if (e.target !== canvasEl && e.target !== worldEl &&
+        !e.target.matches('#edges, #edges *, #empty-hint, #empty-hint *')) return;
+    setTimeout(() => chatInput.focus(), 0);
+  });
+
+  // Shared zoom logic — used by wheel, slider, and ± buttons
+  const ZOOM_MIN = 0.2, ZOOM_MAX = 4;
+
+  function applyZoom(newK, pivotX, pivotY) {
+    newK = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newK));
+    if (newK === state.transform.k) return;
+    const ratio = newK / state.transform.k;
+    state.transform.x = pivotX - (pivotX - state.transform.x) * ratio;
+    state.transform.y = pivotY - (pivotY - state.transform.y) * ratio;
+    state.transform.k = newK;
+    applyTransform();
+    updateZoomUI();
+  }
+
+  function setZoomCentered(newK) {
+    const rect = canvasEl.getBoundingClientRect();
+    applyZoom(newK, rect.width / 2, rect.height / 2);
+  }
+
+  // Wheel zoom — pivot around cursor, beefed-up sensitivity
+  canvasEl.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // Larger step + clamp per-event so a single wheel notch is visible
+    const raw = -e.deltaY * 0.0025;
+    const delta = Math.max(-0.25, Math.min(0.25, raw));
+    applyZoom(state.transform.k * (1 + delta), mx, my);
+  }, { passive: false });
+
+  // Zoom slider / buttons (right rail)
+  const zoomSliderEl = document.getElementById('zoom-slider');
+  const zoomLabelEl = document.getElementById('zoom-label');
+  const zoomInEl = document.getElementById('zoom-in');
+  const zoomOutEl = document.getElementById('zoom-out');
+  const zoomFitEl = document.getElementById('zoom-fit');
+
+  function updateZoomUI() {
+    if (!zoomSliderEl) return;
+    if (document.activeElement !== zoomSliderEl) zoomSliderEl.value = String(state.transform.k);
+    zoomLabelEl.textContent = `${Math.round(state.transform.k * 100)}%`;
+  }
+  zoomSliderEl.addEventListener('input', (e) => {
+    setZoomCentered(parseFloat(e.target.value));
+  });
+  zoomInEl.addEventListener('click', () => setZoomCentered(state.transform.k * 1.2));
+  zoomOutEl.addEventListener('click', () => setZoomCentered(state.transform.k / 1.2));
+  zoomFitEl.addEventListener('click', () => {
+    // Reset to 100% and recenter origin
+    state.transform.x = 0;
+    state.transform.y = 0;
+    state.transform.k = 1;
+    applyTransform();
+    updateZoomUI();
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Spawn position (find empty area)
+  // ═══════════════════════════════════════════════════════════
+  function findSpawnPosition() {
+    // Convert viewport center to world coordinates
+    const rect = canvasEl.getBoundingClientRect();
+    const cx = (rect.width / 2 - state.transform.x) / state.transform.k;
+    const cy = (rect.height / 2 - state.transform.y) / state.transform.k;
+
+    // Try spiral search to find non-overlapping position
+    const W = 160, H = 140, MARGIN = 24;
+    const existing = Array.from(state.notes.values());
+    if (existing.length === 0) return { x: cx - W/2, y: cy - H/2 };
+
+    const tryPos = (x, y) => {
+      for (const n of existing) {
+        if (Math.abs(n.x - x) < W + MARGIN && Math.abs(n.y - y) < H + MARGIN) return false;
+      }
+      return true;
+    };
+
+    let angle = Math.random() * Math.PI * 2;
+    for (let r = 0; r < 2000; r += 30) {
+      for (let i = 0; i < 12; i++) {
+        const x = cx + Math.cos(angle) * r - W/2;
+        const y = cy + Math.sin(angle) * r - H/2;
+        if (tryPos(x, y)) return { x, y };
+        angle += Math.PI / 6;
+      }
+    }
+    // Fallback: random
+    return { x: cx + (Math.random() - 0.5) * 600, y: cy + (Math.random() - 0.5) * 400 };
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Add note
+  // ═══════════════════════════════════════════════════════════
+  function addNote(text, opts = {}) {
+    pushHistory();
+    const { x, y } = findSpawnPosition();
+    const note = {
+      id: nextId(),
+      text: text || '',
+      image: opts.image || null,        // base64 data URL for image notes
+      x, y,
+      treeX: null, treeY: null,
+      color: DEFAULT_COLOR,
+      tags: [],
+      rotation: (Math.random() - 0.5) * 2,   // -1 to 1 deg
+      createdAt: Date.now()
+    };
+    state.notes.set(note.id, note);
+    render();
+    save();
+    if (state.mode === 'tree') relayoutTree(true);
+    return note;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Delete note
+  // ═══════════════════════════════════════════════════════════
+  function deleteNote(id) {
+    pushHistory();
+    state.notes.delete(id);
+    // Clean edges
+    state.edges = new Set([...state.edges].filter(e => {
+      const [a, b] = e.split('|');
+      return a !== id && b !== id;
+    }));
+    if (state.selectedId === id) state.selectedId = null;
+    render();
+    save();
+    if (state.mode === 'tree') relayoutTree(true);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Edges helpers (undirected)
+  // ═══════════════════════════════════════════════════════════
+  function edgeKey(a, b) { return [a, b].sort().join('|'); }
+  function addEdge(a, b) {
+    if (a === b) return;
+    state.edges.add(edgeKey(a, b));
+    save();
+  }
+  function getEdges() {
+    return [...state.edges].map(k => k.split('|'));
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Tree layout (Reingold–Tilford)
+  // ═══════════════════════════════════════════════════════════
+  // Derive a parent map from undirected edges:
+  //   - Each connected component picks the highest-degree node as root
+  //   - BFS from that root assigns parents (so hubs sit above leaves)
+  //   - Ties broken by id for deterministic layout
+  //   - Cycle edges are silently dropped from the tree view (still visible
+  //     as network edges in network mode)
+  function derivedParentMap() {
+    const ids = Array.from(state.notes.keys());
+    const adj = new Map(ids.map(id => [id, new Set()]));
+    for (const ek of state.edges) {
+      const [a, b] = ek.split('|');
+      if (adj.has(a) && adj.has(b)) {
+        adj.get(a).add(b);
+        adj.get(b).add(a);
+      }
+    }
+    const deg = (id) => adj.get(id)?.size || 0;
+    const cmp = (a, b) => {
+      const dd = deg(b) - deg(a);
+      if (dd !== 0) return dd;
+      return a < b ? -1 : a > b ? 1 : 0;
+    };
+    const visited = new Set();
+    const parent = new Map();
+    const seeds = [...ids].sort(cmp);
+    for (const seed of seeds) {
+      if (visited.has(seed)) continue;
+      visited.add(seed);
+      parent.set(seed, null);
+      const q = [seed];
+      while (q.length) {
+        const cur = q.shift();
+        const nbrs = [...adj.get(cur)].filter(n => !visited.has(n)).sort(cmp);
+        for (const nb of nbrs) {
+          visited.add(nb);
+          parent.set(nb, cur);
+          q.push(nb);
+        }
+      }
+    }
+    return parent;
+  }
+
+  function relayoutTree(animate = false) {
+    const notes = Array.from(state.notes.values());
+    if (notes.length === 0) { state._treeParent = new Map(); render(); return; }
+
+    const parent = derivedParentMap();
+    state._treeParent = parent;
+
+    const childrenOf = new Map();
+    childrenOf.set('__root__', []);
+    for (const [id, p] of parent) {
+      const key = p ?? '__root__';
+      if (!childrenOf.has(key)) childrenOf.set(key, []);
+      childrenOf.get(key).push(id);
+    }
+
+    function build(id) {
+      const kids = childrenOf.get(id) || [];
+      return { id, children: kids.map(build) };
+    }
+    const root = build('__root__');
+    const h = d3.hierarchy(root);
+    const tree = d3.tree().nodeSize([200, 220]);
+    tree(h);
+
+    // Find bounds to center
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    h.each(d => {
+      if (d.data.id === '__root__') return;
+      if (d.x < minX) minX = d.x;
+      if (d.x > maxX) maxX = d.x;
+      if (d.y < minY) minY = d.y;
+      if (d.y > maxY) maxY = d.y;
+    });
+    const rect = canvasEl.getBoundingClientRect();
+    const cx = (rect.width / 2 - state.transform.x) / state.transform.k;
+    const cy = (rect.height / 2 - state.transform.y) / state.transform.k;
+    const ox = cx - (minX + maxX) / 2 - 80;
+    const oy = cy - (minY + maxY) / 2 - 200;
+
+    h.each(d => {
+      if (d.data.id === '__root__') return;
+      const note = state.notes.get(d.data.id);
+      if (!note) return;
+      note.treeX = d.x + ox;
+      note.treeY = d.y + oy;
+    });
+
+    render();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Render
+  // ═══════════════════════════════════════════════════════════
+  function render() {
+    // Notes
+    const existing = new Set();
+    for (const note of state.notes.values()) {
+      let el = document.getElementById(`note-${note.id}`);
+      if (!el) {
+        el = createNoteElement(note);
+        notesEl.appendChild(el);
+      }
+      const x = state.mode === 'tree' ? (note.treeX ?? note.x) : note.x;
+      const y = state.mode === 'tree' ? (note.treeY ?? note.y) : note.y;
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.background = note.color;
+      el.style.transform = `rotate(${note.rotation}deg)`;
+      el.classList.toggle('selected', note.id === state.selectedId);
+      el.classList.toggle('has-image', !!note.image);
+      const imgEl = el.querySelector('.image');
+      if (note.image) {
+        if (!imgEl) {
+          const img = document.createElement('img');
+          img.className = 'image';
+          img.draggable = false;
+          img.src = note.image;
+          el.insertBefore(img, el.firstChild);
+        } else if (imgEl.src !== note.image) {
+          imgEl.src = note.image;
+        }
+      } else if (imgEl) {
+        imgEl.remove();
+      }
+      const textEl = el.querySelector('.text');
+      if (document.activeElement !== textEl) textEl.textContent = note.text;
+      const tagsEl = el.querySelector('.tags');
+      if (tagsEl && document.activeElement !== tagsEl) {
+        tagsEl.textContent = (note.tags || []).join(' ');
+      }
+      existing.add(el.id);
+    }
+    // Cleanup deleted
+    notesEl.querySelectorAll('.note').forEach(n => {
+      if (!existing.has(n.id)) n.remove();
+    });
+
+    renderEdges();
+
+    // UI state
+    countEl.textContent = `${state.notes.size} note${state.notes.size === 1 ? '' : 's'}`;
+    document.body.classList.toggle('has-notes', state.notes.size > 0);
+    paletteEl.classList.toggle('visible', !!state.selectedId);
+    updatePaletteActive();
+  }
+
+  function createNoteElement(note) {
+    const el = document.createElement('div');
+    el.className = 'note';
+    el.id = `note-${note.id}`;
+
+    const text = document.createElement('div');
+    text.className = 'text';
+    text.contentEditable = 'false';
+    text.spellcheck = false;
+    text.textContent = note.text;
+    text.addEventListener('input', () => {
+      const n = state.notes.get(note.id);
+      if (n) { n.text = text.textContent; save(); }
+    });
+    text.addEventListener('blur', () => { text.contentEditable = 'false'; });
+
+    const id = document.createElement('div');
+    id.className = 'id';
+    id.textContent = note.id;
+
+    const tags = document.createElement('div');
+    tags.className = 'tags';
+    tags.contentEditable = 'false';
+    tags.spellcheck = false;
+    tags.textContent = (note.tags || []).join(' ');
+    tags.addEventListener('input', () => {
+      const n = state.notes.get(note.id);
+      if (!n) return;
+      const raw = tags.textContent.trim();
+      n.tags = raw ? raw.split(/\s+/).filter(t => t.length > 0) : [];
+      save();
+    });
+    tags.addEventListener('blur', () => { tags.contentEditable = 'false'; });
+
+    const handle = document.createElement('div');
+    handle.className = 'connect-handle';
+    handle.title = '드래그하여 다른 포스트잇에 연결';
+    handle.addEventListener('mousedown', (e) => startConnect(e, note.id));
+
+    const del = document.createElement('button');
+    del.className = 'delete-btn';
+    del.textContent = '×';
+    del.title = '삭제';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm('이 포스트잇을 삭제할까요?')) deleteNote(note.id);
+    });
+    del.addEventListener('mousedown', (e) => e.stopPropagation());
+
+    el.appendChild(text);
+    el.appendChild(tags);
+    el.appendChild(id);
+    el.appendChild(handle);
+    el.appendChild(del);
+
+    // The whole note body is the drag/select target. .text/.tags are read-only
+    // unless edit mode is active (double-click). connect-handle / delete-btn
+    // own their own actions; let them pass.
+    el.addEventListener('mousedown', (e) => {
+      if (e.target.classList.contains('connect-handle') ||
+          e.target.classList.contains('delete-btn')) return;
+      // If user is already editing text/tags, don't hijack caret placement
+      if ((e.target === text || e.target === tags) &&
+          e.target.contentEditable === 'true') return;
+      e.stopPropagation();
+      if (spaceHeld) return;       // Let document capture handle pan
+      // Left-fist acts as Shift modifier: click → connect
+      if (e.shiftKey || handState.leftFistActive) {
+        e.preventDefault();
+        handleShiftConnect(note.id);
+        return;
+      }
+      startDrag(e, note.id);
+    });
+
+    // Double-click → enter edit mode on whichever region was clicked
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.classList.contains('connect-handle') ||
+          e.target.classList.contains('delete-btn')) return;
+      const target = e.target === tags ? tags : text;
+      e.preventDefault();
+      e.stopPropagation();
+      enterEditMode(target, note.id);
+    });
+
+    return el;
+  }
+
+  function enterEditMode(editEl, noteId) {
+    if (editEl.contentEditable === 'true') return;
+    editEl.contentEditable = 'true';
+    state.selectedId = noteId;
+    editEl.focus();
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(editEl);
+      range.collapse(false);  // caret at end
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) {}
+    render();
+  }
+
+  function drawTreeGroups() {
+    const pmap = state._treeParent || derivedParentMap();
+    // Build parent → children map from the derived hierarchy
+    const childrenMap = new Map();
+    for (const [id, p] of pmap) {
+      if (p && state.notes.has(p)) {
+        if (!childrenMap.has(p)) childrenMap.set(p, []);
+        childrenMap.get(p).push(id);
+      }
+    }
+    if (childrenMap.size === 0) return;
+
+    function depthOf(id) {
+      let d = 0;
+      let cur = id;
+      const seen = new Set();
+      while (cur && pmap.get(cur) && !seen.has(cur)) {
+        seen.add(cur);
+        d++;
+        cur = pmap.get(cur);
+      }
+      return d;
+    }
+
+    const PAD = 20;
+    const groups = [];
+    for (const [parentId] of childrenMap) {
+      // Collect parent + all descendants
+      const stack = [parentId];
+      const all = new Set();
+      while (stack.length) {
+        const id = stack.pop();
+        if (all.has(id)) continue;
+        all.add(id);
+        const kids = childrenMap.get(id) || [];
+        for (const k of kids) stack.push(k);
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const id of all) {
+        const n = state.notes.get(id);
+        if (!n || n.treeX == null) continue;
+        const el = document.getElementById(`note-${id}`);
+        const w = el ? el.offsetWidth : 160;
+        const h = el ? el.offsetHeight : 140;
+        if (n.treeX < minX) minX = n.treeX;
+        if (n.treeY < minY) minY = n.treeY;
+        if (n.treeX + w > maxX) maxX = n.treeX + w;
+        if (n.treeY + h > maxY) maxY = n.treeY + h;
+      }
+      if (!isFinite(minX)) continue;
+      groups.push({
+        parentId,
+        depth: depthOf(parentId),
+        x: minX - PAD, y: minY - PAD,
+        w: maxX - minX + PAD * 2, h: maxY - minY + PAD * 2,
+      });
+    }
+    // Outer (shallow) first, so deeper groups stack on top → natural nesting glow
+    groups.sort((a, b) => a.depth - b.depth);
+    for (const g of groups) {
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', g.x);
+      rect.setAttribute('y', g.y);
+      rect.setAttribute('width', g.w);
+      rect.setAttribute('height', g.h);
+      rect.setAttribute('rx', 16);
+      rect.setAttribute('ry', 16);
+      rect.classList.add('tree-group');
+      edgesEl.appendChild(rect);
+    }
+  }
+
+  function renderEdges() {
+    const edges = getEdges();
+    // Tree mode: show only the derived parent links (cycle edges hidden here,
+    // still preserved in state.edges and re-appear in network mode).
+    let all;
+    if (state.mode === 'tree') {
+      const pmap = state._treeParent || derivedParentMap();
+      all = [];
+      for (const [id, p] of pmap) {
+        if (p) all.push([p, id]);
+      }
+    } else {
+      all = edges;
+    }
+
+    // SVG path renders in screen coords (world transform applied via parent)
+    edgesEl.innerHTML = '';
+
+    // Tree mode: draw subtree group rects underneath edges
+    if (state.mode === 'tree') drawTreeGroups();
+
+    for (const [a, b] of all) {
+      const na = state.notes.get(a);
+      const nb = state.notes.get(b);
+      if (!na || !nb) continue;
+      const ax = (state.mode === 'tree' ? na.treeX : na.x) + 80;
+      const ay = (state.mode === 'tree' ? na.treeY : na.y) + 70;
+      const bx = (state.mode === 'tree' ? nb.treeX : nb.x) + 80;
+      const by = (state.mode === 'tree' ? nb.treeY : nb.y) + 70;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      if (state.mode === 'tree') {
+        // Smooth vertical curve
+        const my = (ay + by) / 2;
+        path.setAttribute('d', `M${ax},${ay} C${ax},${my} ${bx},${my} ${bx},${by}`);
+      } else {
+        // Straight line
+        path.setAttribute('d', `M${ax},${ay} L${bx},${by}`);
+      }
+      edgesEl.appendChild(path);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Drag note
+  // ═══════════════════════════════════════════════════════════
+  let dragState = null;
+  function startDrag(e, id) {
+    const note = state.notes.get(id);
+    if (!note) return;
+    state.selectedId = id;
+    const el = document.getElementById(`note-${id}`);
+    el.classList.add('dragging', 'no-transition');
+    dragState = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: state.mode === 'tree' ? (note.treeX ?? note.x) : note.x,
+      origY: state.mode === 'tree' ? (note.treeY ?? note.y) : note.y,
+      snapshot: snapshot(),
+      moved: false
+    };
+    render();
+  }
+  window.addEventListener('mousemove', (e) => {
+    if (!dragState) return;
+    const note = state.notes.get(dragState.id);
+    if (!note) return;
+    const dx = (e.clientX - dragState.startX) / state.transform.k;
+    const dy = (e.clientY - dragState.startY) / state.transform.k;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragState.moved = true;
+    if (state.mode === 'tree') {
+      note.treeX = dragState.origX + dx;
+      note.treeY = dragState.origY + dy;
+    } else {
+      note.x = dragState.origX + dx;
+      note.y = dragState.origY + dy;
+    }
+    const el = document.getElementById(`note-${dragState.id}`);
+    if (el) {
+      el.style.left = `${state.mode === 'tree' ? note.treeX : note.x}px`;
+      el.style.top = `${state.mode === 'tree' ? note.treeY : note.y}px`;
+    }
+    renderEdges();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragState) return;
+    const el = document.getElementById(`note-${dragState.id}`);
+    if (el) {
+      el.classList.remove('dragging');
+      setTimeout(() => el.classList.remove('no-transition'), 50);
+    }
+    if (dragState.moved) pushHistory(dragState.snapshot);
+    dragState = null;
+    save();
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Connection drag
+  // ═══════════════════════════════════════════════════════════
+  let connectState = null;
+  function startConnect(e, fromId) {
+    e.stopPropagation();
+    const from = state.notes.get(fromId);
+    if (!from) return;
+    connectState = { fromId, mouseX: e.clientX, mouseY: e.clientY };
+    document.body.style.cursor = 'crosshair';
+  }
+  window.addEventListener('mousemove', (e) => {
+    if (!connectState) return;
+    connectState.mouseX = e.clientX;
+    connectState.mouseY = e.clientY;
+    drawGhostLine();
+  });
+  function drawGhostLine() {
+    if (!connectState) return;
+    const from = state.notes.get(connectState.fromId);
+    if (!from) return;
+    let ghost = document.getElementById('ghost-line');
+    if (!ghost) {
+      ghost = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      ghost.id = 'ghost-line';
+      ghost.classList.add('dragging');
+      edgesEl.appendChild(ghost);
+    }
+    const ax = (state.mode === 'tree' ? from.treeX : from.x) + 80;
+    const ay = (state.mode === 'tree' ? from.treeY : from.y) + 70;
+    // mouse in world coords
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = (connectState.mouseX - rect.left - state.transform.x) / state.transform.k;
+    const my = (connectState.mouseY - rect.top - state.transform.y) / state.transform.k;
+    ghost.setAttribute('d', `M${ax},${ay} L${mx},${my}`);
+  }
+  window.addEventListener('mouseup', (e) => {
+    if (!connectState) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const noteEl = target?.closest('.note');
+    if (noteEl && noteEl.id !== `note-${connectState.fromId}`) {
+      const toId = noteEl.id.replace('note-', '');
+      const key = edgeKey(connectState.fromId, toId);
+      pushHistory();
+      if (state.edges.has(key)) {
+        state.edges.delete(key);
+        toast('연결 해제');
+      } else {
+        addEdge(connectState.fromId, toId);
+      }
+      if (state.mode === 'tree') relayoutTree(true);
+      render();
+    }
+    const ghost = document.getElementById('ghost-line');
+    if (ghost) ghost.remove();
+    connectState = null;
+    document.body.style.cursor = '';
+  });
+
+  // ── Shift+click connect (no drag needed) — toggles ──
+  // Re-issuing the same pair removes the edge, so a stray connection is easy
+  // to undo by repeating the gesture.
+  function handleShiftConnect(targetId) {
+    // If nothing selected yet, just select this one as the source
+    if (!state.selectedId || state.selectedId === targetId) {
+      state.selectedId = targetId;
+      render();
+      return;
+    }
+    const sourceId = state.selectedId;
+    const key = edgeKey(sourceId, targetId);
+    pushHistory();
+    if (state.edges.has(key)) {
+      state.edges.delete(key);
+      toast('연결 해제');
+    } else {
+      addEdge(sourceId, targetId);
+    }
+    save();
+    if (state.mode === 'tree') relayoutTree(true);
+    // Move selection so user can chain: shift-click next → connect target → next
+    state.selectedId = targetId;
+    render();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Mode toggle
+  // ═══════════════════════════════════════════════════════════
+  document.querySelectorAll('#mode-seg button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.mode;
+      if (mode === state.mode) return;
+      document.querySelectorAll('#mode-seg button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.mode = mode;
+      if (mode === 'tree') relayoutTree(true);
+      else render();
+      save();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Chat input
+  // ═══════════════════════════════════════════════════════════
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (text) {
+        addNote(text);
+        chatInput.value = '';
+      }
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Keyboard shortcuts
+  // ═══════════════════════════════════════════════════════════
+  document.addEventListener('keydown', (e) => {
+    // Escape: blur editable → deselect
+    if (e.key === 'Escape') {
+      if (isEditableTarget(document.activeElement)) {
+        document.activeElement.blur();
+        e.preventDefault();
+        return;
+      }
+      state.selectedId = null;
+      render();
+      return;
+    }
+    // Cmd/Ctrl + Z = undo (works even when chat input focused, but not when typing in note)
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      if (document.activeElement?.classList.contains('text') ||
+          document.activeElement?.classList.contains('tags')) return;
+      e.preventDefault();
+      undo();
+      return;
+    }
+    if (document.activeElement === chatInput) return;
+    if (isEditableTarget(document.activeElement)) return;
+    // 0: reset to white · 1-8: palette slots (follow user's drag order)
+    if (e.key === '0' && state.selectedId) {
+      const n = state.notes.get(state.selectedId);
+      if (n && n.color !== '#ffffff') {
+        pushHistory();
+        n.color = '#ffffff'; render(); save();
+      }
+    }
+    const num = parseInt(e.key, 10);
+    if (num >= 1 && num <= state.paletteOrder.length && state.selectedId) {
+      const n = state.notes.get(state.selectedId);
+      if (n) {
+        const hex = PALETTE[state.paletteOrder[num - 1]].hex;
+        if (n.color !== hex) { pushHistory(); n.color = hex; render(); save(); }
+      }
+    }
+    // Delete: remove selected
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedId) {
+      if (confirm('선택한 포스트잇을 삭제할까요?')) deleteNote(state.selectedId);
+    }
+    // / : focus chat
+    if (e.key === '/') {
+      e.preventDefault();
+      chatInput.focus();
+    }
+  });
+
+  // Select note on click
+  notesEl.addEventListener('click', (e) => {
+    const noteEl = e.target.closest('.note');
+    if (!noteEl) return;
+    const id = noteEl.id.replace('note-', '');
+    state.selectedId = id;
+    render();
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Persistence
+  // ═══════════════════════════════════════════════════════════
+  const STORAGE_KEY = 'postit-board-v1';
+
+  function save() {
+    const data = {
+      notes: Array.from(state.notes.values()),
+      edges: [...state.edges],
+      mode: state.mode,
+      transform: state.transform
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (err) {
+      console.warn('save failed', err);
+      // QuotaExceededError when too many images pile up in localStorage (~5MB cap)
+      if (err && (err.name === 'QuotaExceededError' || /quota/i.test(err.message || ''))) {
+        toast('저장 용량 초과 — 이미지/노트를 줄이거나 Export 후 일부 삭제');
+      }
+    }
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      hydrate(data);
+    } catch (err) {
+      console.warn('load failed', err);
+    }
+  }
+
+  function hydrate(data) {
+    state.notes = new Map();
+    for (const n of data.notes || []) {
+      state.notes.set(n.id, {
+        rotation: 0,
+        tags: [],
+        ...n
+      });
+    }
+    state.edges = new Set(data.edges || []);
+    // Migration: legacy notes used n.parent for tree hierarchy. Fold into edges
+    // (which is now the single source of truth) and drop the field.
+    for (const n of state.notes.values()) {
+      if (n.parent && state.notes.has(n.parent)) {
+        state.edges.add(edgeKey(n.id, n.parent));
+      }
+      delete n.parent;
+    }
+    state.mode = data.mode || 'network';
+    state.transform = data.transform || { x: 0, y: 0, k: 1 };
+    document.querySelectorAll('#mode-seg button').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === state.mode);
+    });
+    applyTransform();
+    if (state.mode === 'tree') relayoutTree(false);
+    else render();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Export / Import / Clear
+  // ═══════════════════════════════════════════════════════════
+  document.getElementById('btn-export').addEventListener('click', () => {
+    const data = {
+      notes: Array.from(state.notes.values()),
+      edges: [...state.edges],
+      mode: state.mode,
+      exportedAt: new Date().toISOString()
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `postit-board-${todayStamp()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('내보냈습니다');
+  });
+
+  document.getElementById('btn-import').addEventListener('click', () => {
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    if (files.length === 0) return;
+    let imgCount = 0;
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
+        await addImageFile(file);
+        imgCount++;
+      } else if (file.type === 'application/json' || /\.json$/i.test(file.name)) {
+        try {
+          const text = await file.text();
+          const data = JSON.parse(text);
+          pushHistory();
+          hydrate(data);
+          save();
+          toast('JSON 불러왔습니다');
+        } catch (err) {
+          toast('JSON 형식이 잘못되었습니다');
+        }
+      } else {
+        toast('지원하지 않는 파일: ' + (file.name || file.type));
+      }
+    }
+    if (imgCount > 0) toast(`이미지 ${imgCount}개 추가`);
+    fileInput.value = '';
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    if (!confirm('모든 포스트잇을 삭제할까요? (⌘Z로 되돌릴 수 있어요)')) return;
+    pushHistory();
+    state.notes.clear();
+    state.edges.clear();
+    state.selectedId = null;
+    save();
+    render();
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Toast
+  // ═══════════════════════════════════════════════════════════
+  let toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('visible');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('visible'), 1800);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Hand tracking (camera + MediaPipe Hands · 2 hands · trail)
+  // ═══════════════════════════════════════════════════════════
+  const handState = {
+    enabled: false,
+    hands: null,
+    camera: null,
+    stream: null,
+    cursors: new Map(),   // handLabel ('Left'/'Right') → cursor object
+    trailRAF: null,
+    drawMode: false,      // false = Move (select/drag) · true = Draw (paint)
+    leftFistActive: false, // soft modifier: pan-on-mouse + shift-click-to-connect
+  };
+
+  const camPipEl = document.getElementById('cam-pip');
+  const camVideoEl = document.getElementById('cam-video');
+  const camOverlayEl = document.getElementById('cam-overlay');
+  const camStatusEl = document.getElementById('cam-status');
+  const camCloseEl = document.getElementById('cam-close');
+  const handCursorsEl = document.getElementById('hand-cursors');
+  const trailCanvasEl = document.getElementById('trail-canvas');
+  const btnHandEl = document.getElementById('btn-hand');
+
+  function resizeTrailCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    trailCanvasEl.width = window.innerWidth * dpr;
+    trailCanvasEl.height = window.innerHeight * dpr;
+    trailCanvasEl.style.width = window.innerWidth + 'px';
+    trailCanvasEl.style.height = window.innerHeight + 'px';
+    const ctx = trailCanvasEl.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', () => {
+    if (handState.enabled) resizeTrailCanvas();
+  });
+
+  btnHandEl.addEventListener('click', () => {
+    if (handState.enabled) disableHandTracking();
+    else enableHandTracking();
+  });
+  camCloseEl.addEventListener('click', disableHandTracking);
+
+  // Move / Draw toggle (inside PIP)
+  document.querySelectorAll('#cam-modes button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.camMode;
+      handState.drawMode = (mode === 'draw');
+      document.querySelectorAll('#cam-modes button').forEach(b => {
+        b.classList.toggle('active', b.dataset.camMode === mode);
+      });
+      // Wipe trail when switching, so old strokes don't carry into a new context
+      const tctx = trailCanvasEl.getContext('2d');
+      tctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      // Release any in-progress grabs and reset per-cursor stroke state
+      for (const c of handState.cursors.values()) {
+        if (c.grabbedId) releasePinch(c);
+        c.grabbing = false;
+        c.lastTrailX = null;
+        c.lastTrailY = null;
+      }
+    });
+  });
+
+  async function enableHandTracking() {
+    if (handState.enabled) return;
+    if (!window.Hands || !window.Camera) {
+      toast('MediaPipe 라이브러리 로딩 실패 — 네트워크 확인');
+      return;
+    }
+    camPipEl.classList.remove('hidden');
+    camStatusEl.textContent = '카메라 권한 요청 중…';
+    btnHandEl.classList.add('active');
+
+    try {
+      handState.stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: 'user' },
+        audio: false,
+      });
+      camVideoEl.srcObject = handState.stream;
+      await new Promise((resolve) => {
+        if (camVideoEl.readyState >= 1) resolve();
+        else camVideoEl.onloadedmetadata = () => resolve();
+      });
+      await camVideoEl.play();
+
+      camOverlayEl.width = camVideoEl.videoWidth || 640;
+      camOverlayEl.height = camVideoEl.videoHeight || 480;
+
+      handState.hands = new window.Hands({
+        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+      });
+      handState.hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.6,
+      });
+      handState.hands.onResults(onHandResults);
+
+      handState.camera = new window.Camera(camVideoEl, {
+        onFrame: async () => {
+          if (handState.hands) {
+            try { await handState.hands.send({ image: camVideoEl }); } catch (e) {}
+          }
+        },
+        width: 640, height: 480,
+      });
+      await handState.camera.start();
+
+      handState.enabled = true;
+      camStatusEl.textContent = '두 손 모두 인식 · 엄지+검지 핀치 = 잡기 · 원을 그리면 노트';
+      document.body.classList.add('hand-active');
+      resizeTrailCanvas();
+      trailCanvasEl.classList.add('active');
+      startTrailLoop();
+    } catch (err) {
+      console.error(err);
+      toast('카메라 접근 실패: ' + (err.message || err.name || 'unknown'));
+      disableHandTracking();
+    }
+  }
+
+  function disableHandTracking() {
+    // Release any in-progress grabs
+    for (const cursor of handState.cursors.values()) {
+      if (cursor.grabbedId) releasePinch(cursor);
+    }
+    if (handState.camera) {
+      try { handState.camera.stop(); } catch (e) {}
+      handState.camera = null;
+    }
+    if (handState.stream) {
+      handState.stream.getTracks().forEach((t) => t.stop());
+      handState.stream = null;
+    }
+    if (handState.hands) {
+      try { handState.hands.close(); } catch (e) {}
+      handState.hands = null;
+    }
+    if (handState.trailRAF) {
+      cancelAnimationFrame(handState.trailRAF);
+      handState.trailRAF = null;
+    }
+    handState.enabled = false;
+    // Remove cursor DOM
+    for (const cursor of handState.cursors.values()) {
+      if (cursor.el && cursor.el.parentNode) cursor.el.remove();
+    }
+    handState.cursors.clear();
+    if (camVideoEl) camVideoEl.srcObject = null;
+    camPipEl.classList.add('hidden');
+    btnHandEl.classList.remove('active');
+    trailCanvasEl.classList.remove('active');
+    const tctx = trailCanvasEl.getContext('2d');
+    tctx.clearRect(0, 0, trailCanvasEl.width, trailCanvasEl.height);
+    document.body.classList.remove('hand-active');
+  }
+
+  // ── Trail persistence loop ──
+  // Independent of MediaPipe frame rate so the trail fades smoothly
+  // even when no hand is visible.
+  //
+  // IMPORTANT: we erase alpha (destination-out) rather than painting with
+  // the page background — otherwise the fill stacks up and the canvas turns
+  // opaque, hiding the notes underneath.
+  function startTrailLoop() {
+    const tctx = trailCanvasEl.getContext('2d');
+    const loop = () => {
+      if (!handState.enabled) return;
+      if (handState.drawMode) {
+        // Exponential alpha decay — slow enough to look like a glowing afterimage
+        tctx.save();
+        tctx.globalCompositeOperation = 'destination-out';
+        tctx.fillStyle = 'rgba(0,0,0,0.035)';
+        tctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        tctx.restore();
+      } else {
+        // Move mode: keep the overlay fully transparent so notes stay visible
+        tctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      }
+      handState.trailRAF = requestAnimationFrame(loop);
+    };
+    handState.trailRAF = requestAnimationFrame(loop);
+  }
+
+  // Neon dot stamp — used by pincer in Draw mode (precise, no smearing line).
+  // Right hand → electric blue, Left hand → hot red.
+  function drawDotStamp(cursor, x, y) {
+    const isLeft = cursor.label === 'Left';
+    const core = isLeft ? '#ff2848' : '#3aa9ff';
+    const glow = isLeft ? '#ff6b85' : '#7ec8ff';
+    const tctx = trailCanvasEl.getContext('2d');
+    tctx.save();
+    tctx.shadowBlur = 22;
+    tctx.shadowColor = glow;
+    tctx.fillStyle = core;
+    tctx.globalAlpha = 0.95;
+    tctx.beginPath();
+    tctx.arc(x, y, 5, 0, Math.PI * 2);
+    tctx.fill();
+    tctx.restore();
+    cursor.lastTrailX = x;
+    cursor.lastTrailY = y;
+  }
+
+  // Neon brush — 2-layer stroke (wide blurred glow + crisp core).
+  // Right hand → electric blue, Left hand → hot red.
+  function drawTrailSegment(cursor, x, y) {
+    if (cursor.lastTrailX == null) {
+      cursor.lastTrailX = x;
+      cursor.lastTrailY = y;
+      return;
+    }
+    const isLeft = cursor.label === 'Left';
+    const core = isLeft ? '#ff2848' : '#3aa9ff';
+    const glow = isLeft ? '#ff6b85' : '#7ec8ff';
+
+    const tctx = trailCanvasEl.getContext('2d');
+    tctx.save();
+    tctx.lineCap = 'round';
+    tctx.lineJoin = 'round';
+
+    // Outer glow halo
+    tctx.shadowBlur = 28;
+    tctx.shadowColor = glow;
+    tctx.strokeStyle = glow;
+    tctx.lineWidth = 18;
+    tctx.globalAlpha = 0.35;
+    tctx.beginPath();
+    tctx.moveTo(cursor.lastTrailX, cursor.lastTrailY);
+    tctx.lineTo(x, y);
+    tctx.stroke();
+
+    // Bright crisp core
+    tctx.shadowBlur = 14;
+    tctx.shadowColor = core;
+    tctx.strokeStyle = core;
+    tctx.lineWidth = 7;
+    tctx.globalAlpha = 0.98;
+    tctx.beginPath();
+    tctx.moveTo(cursor.lastTrailX, cursor.lastTrailY);
+    tctx.lineTo(x, y);
+    tctx.stroke();
+
+    tctx.restore();
+    cursor.lastTrailX = x;
+    cursor.lastTrailY = y;
+  }
+
+  function getCursor(label) {
+    let cursor = handState.cursors.get(label);
+    if (!cursor) {
+      const el = document.createElement('div');
+      el.className = 'hand-cursor';
+      el.dataset.hand = label;
+      handCursorsEl.appendChild(el);
+      cursor = {
+        label, el,
+        kind: null,                 // 'palm' | 'pincer' | 'fist'
+        grabbing: false, grabbedId: null, pinchSnapshot: null, dragStart: null,
+        smoothX: null, smoothY: null,
+        prevRawX: null, prevRawY: null,
+        lastTrailX: null, lastTrailY: null,
+        pathPts: [],
+        lastGestureT: 0,
+      };
+      handState.cursors.set(label, cursor);
+    }
+    return cursor;
+  }
+
+  // Adaptive EMA — heavier smoothing when slow, lighter when fast
+  function adaptiveAlpha(speedPx) {
+    return Math.min(0.7, 0.12 + speedPx * 0.022);
+  }
+
+  function onHandResults(results) {
+    const ctx = camOverlayEl.getContext('2d');
+    ctx.clearRect(0, 0, camOverlayEl.width, camOverlayEl.height);
+
+    const lmList = results.multiHandLandmarks || [];
+    const handedness = results.multiHandedness || [];
+    const seenLabels = new Set();
+
+    if (lmList.length === 0) {
+      // No hands — release any grabs, hide cursors, clear modifiers
+      for (const cursor of handState.cursors.values()) {
+        if (cursor.grabbing) releasePinch(cursor);
+        cursor.grabbing = false;
+        cursor.kind = null;
+        cursor.el.style.opacity = '0';
+      }
+      if (handState.leftFistActive) {
+        handState.leftFistActive = false;
+        document.body.classList.remove('left-fist-active');
+      }
+      camStatusEl.textContent = '손을 카메라에 보여주세요';
+      return;
+    }
+
+    lmList.forEach((lm, i) => {
+      // MediaPipe reports handedness from the camera's perspective. Our video
+      // is mirrored for the user, so flip Left↔Right to match what the user
+      // sees (their right hand = the cursor labelled 'Right').
+      const rawLabel = handedness[i]?.label || `H${i}`;
+      const label = rawLabel === 'Left' ? 'Right'
+                  : rawLabel === 'Right' ? 'Left'
+                  : rawLabel;
+      seenLabels.add(label);
+      const cursor = getCursor(label);
+
+      // PIP skeleton
+      if (window.drawConnectors && window.HAND_CONNECTIONS) {
+        window.drawConnectors(ctx, lm, window.HAND_CONNECTIONS, {
+          color: 'rgba(255,255,255,0.85)', lineWidth: 2,
+        });
+      }
+      if (window.drawLandmarks) {
+        window.drawLandmarks(ctx, lm, { color: '#FFE872', lineWidth: 1, radius: 3 });
+      }
+
+      processHand(cursor, lm);
+    });
+
+    // Drop any cursor whose label disappeared this frame
+    for (const [label, cursor] of handState.cursors) {
+      if (!seenLabels.has(label)) {
+        if (cursor.grabbing) releasePinch(cursor);
+        cursor.grabbing = false;
+        cursor.kind = null;
+        cursor.el.style.opacity = '0';
+      }
+    }
+
+    // ── Sync soft modifier: left fist == Space (pan) & Shift (connect) ──
+    const visibleCursors = [...handState.cursors.values()].filter(c => seenLabels.has(c.label));
+    const leftFist = visibleCursors.some(c => c.label === 'Left' && c.kind === 'fist');
+    if (leftFist !== handState.leftFistActive) {
+      handState.leftFistActive = leftFist;
+      // Mirror Space-held cursor styling so the user sees pan affordance
+      document.body.classList.toggle('left-fist-active', leftFist);
+    }
+
+    // Status hint
+    const grabbingCursors = visibleCursors.filter(c => c.grabbedId);
+    if (grabbingCursors.length > 0) {
+      const pin = leftFist ? ' · 📌 핀 고정' : '';
+      camStatusEl.textContent = `오른손 잡는 중${pin} · 펴면 놓기`;
+    } else if (handState.drawMode) {
+      camStatusEl.textContent = '✎ Draw — palm=선 / pincer=점 · 파랑·빨강';
+    } else if (leftFist) {
+      camStatusEl.textContent = '✊ 왼손 modifier · 캔버스 드래그=팬 / 노트 클릭=연결';
+    } else {
+      camStatusEl.textContent = `${lmList.length} 손 · 오른손=조작 / 왼손=보조`;
+    }
+  }
+
+  // ── Finger extension: tip is farther from wrist than its MCP joint ──
+  // Works regardless of hand orientation.
+  function isExtended(lm, tipIdx, mcpIdx, threshold = 1.3) {
+    const w = lm[0];
+    const tipD = Math.hypot(lm[tipIdx].x - w.x, lm[tipIdx].y - w.y);
+    const mcpD = Math.hypot(lm[mcpIdx].x - w.x, lm[mcpIdx].y - w.y);
+    return tipD > mcpD * threshold;
+  }
+
+  // Three-way hand shape classifier.
+  //   palm   — index + middle + ring + pinky all extended (open hand)
+  //   pincer — index extended, middle / ring / pinky curled (thumb + index can pinch)
+  //   fist   — index curled, others curled (closed hand)
+  // Ambiguous configurations bias toward the gesture the user most likely
+  // intends:  "index out" → pincer, otherwise palm.
+  function classifyHand(lm) {
+    const indexExt  = isExtended(lm, 8, 5);
+    const middleExt = isExtended(lm, 12, 9);
+    const ringExt   = isExtended(lm, 16, 13);
+    const pinkyExt  = isExtended(lm, 20, 17);
+    const otherCurledCount =
+      (middleExt ? 0 : 1) + (ringExt ? 0 : 1) + (pinkyExt ? 0 : 1);
+
+    // Fist: index curled AND at least two of the others curled
+    if (!indexExt && otherCurledCount >= 2) return 'fist';
+    // Pincer: index extended AND at least two of the others curled
+    if (indexExt && otherCurledCount >= 2) return 'pincer';
+    // Palm: all (or nearly all) extended
+    if (middleExt && ringExt && pinkyExt) return 'palm';
+    // Mixed — fall back by index state
+    return indexExt ? 'pincer' : 'palm';
+  }
+
+  function processHand(cursor, lm) {
+    const thumb = lm[4], index = lm[8], wrist = lm[0], midMcp = lm[9];
+    const handSize = Math.hypot(midMcp.x - wrist.x, midMcp.y - wrist.y) || 0.1;
+    const pinchDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+    const pinchRatio = pinchDist / handSize;
+    const kind = classifyHand(lm);
+    cursor.kind = kind;
+
+    // Normalized → screen (mirrored x to match the mirrored video)
+    const rawX = (1 - index.x) * window.innerWidth;
+    const rawY = index.y * window.innerHeight;
+
+    // Adaptive smoothing — heavier when stationary, lighter when moving
+    let speed = 0;
+    if (cursor.prevRawX != null) {
+      speed = Math.hypot(rawX - cursor.prevRawX, rawY - cursor.prevRawY);
+    }
+    cursor.prevRawX = rawX;
+    cursor.prevRawY = rawY;
+    const a = adaptiveAlpha(speed);
+    cursor.smoothX = cursor.smoothX == null ? rawX : cursor.smoothX * (1 - a) + rawX * a;
+    cursor.smoothY = cursor.smoothY == null ? rawY : cursor.smoothY * (1 - a) + rawY * a;
+
+    const sx = cursor.smoothX, sy = cursor.smoothY;
+
+    // ── Cursor morph by hand shape ──
+    cursor.el.dataset.kind = kind;
+    cursor.el.style.left = `${sx}px`;
+    cursor.el.style.top = `${sy}px`;
+    cursor.el.style.opacity = '1';
+
+    // Per-hand tint for the committed forms (pincer triangle / fist square).
+    // Palm ring stays neutral — color only appears once the hand commits.
+    const isLeft = cursor.label === 'Left';
+    const tintSolid = isLeft ? 'rgb(255, 159, 177)' : 'rgb(126, 200, 227)';
+    const tintAlpha = isLeft ? 'rgba(255, 159, 177, 0.82)' : 'rgba(126, 200, 227, 0.82)';
+
+    // Strong-pinch flag: pincer kind + thumb·index closed enough to grab
+    const pincerClose = kind === 'pincer' && pinchRatio < 0.55;
+
+    if (kind === 'fist') {
+      // Solid square in the hand's tint
+      cursor.el.style.width  = '32px';
+      cursor.el.style.height = '32px';
+      cursor.el.style.background = tintSolid;
+      cursor.el.style.borderColor = tintSolid;
+      cursor.el.style.borderWidth = '2px';
+      cursor.el.style.borderRadius = '5px';
+      cursor.el.style.clipPath = 'none';
+    } else if (kind === 'pincer') {
+      const close = Math.max(0, Math.min(1, 1 - (pinchRatio - 0.15) / 0.55));
+      const size = 26 + (50 - 26) * (1 - close);
+      cursor.el.style.width  = `${size}px`;
+      cursor.el.style.height = `${size}px`;
+      cursor.el.style.background = pincerClose ? tintSolid : tintAlpha;
+      cursor.el.style.borderColor = 'transparent';
+      cursor.el.style.borderWidth = '0';
+      cursor.el.style.borderRadius = '0';
+      cursor.el.style.clipPath = 'polygon(50% 6%, 8% 94%, 92% 94%)';
+    } else {
+      // Palm — neutral open ring (waiting / hovering)
+      cursor.el.style.width  = '130px';
+      cursor.el.style.height = '130px';
+      cursor.el.style.background = 'rgba(15,20,30,0.03)';
+      cursor.el.style.borderColor = 'rgba(15,20,30,0.55)';
+      cursor.el.style.borderWidth = '1.5px';
+      cursor.el.style.borderRadius = '50%';
+      cursor.el.style.clipPath = 'none';
+    }
+
+    // ── Grab intent: RIGHT hand only, and only in Move mode ──
+    // Draw mode is purely for drawing — no accidental grabs while painting.
+    const wasGrabbing = cursor.grabbing;
+    const grabIntent = !isLeft && !handState.drawMode &&
+                       (pincerClose || kind === 'fist');
+    cursor.grabbing = grabIntent;
+
+    if (!wasGrabbing && grabIntent) startPinch(cursor, sx, sy);
+    else if (wasGrabbing && !grabIntent) releasePinch(cursor);
+    else if (grabIntent && cursor.grabbedId) dragGrabbed(cursor, sx, sy);
+
+    // ── Draw mode: pure drawing — no gestures, no grabs ──
+    //   palm   → continuous brush stroke (free sweep)
+    //   pincer → discrete dot stamps (precise, no smearing line)
+    //   fist   → skip (rest position)
+    if (handState.drawMode) {
+      if (kind === 'pincer') drawDotStamp(cursor, sx, sy);
+      else if (kind === 'palm') drawTrailSegment(cursor, sx, sy);
+      else { cursor.lastTrailX = sx; cursor.lastTrailY = sy; }
+    } else {
+      cursor.lastTrailX = sx;
+      cursor.lastTrailY = sy;
+    }
+  }
+
+  // Heuristic circle detector: bounding box ~ square, start ≈ end, path length ~ π·diameter
+  function detectCircleGesture(pts) {
+    if (pts.length < 18) return false;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const w = maxX - minX, h = maxY - minY;
+    if (w < 80 || h < 80) return false;                          // too small
+    if (Math.abs(w - h) / Math.max(w, h) > 0.45) return false;   // not square-ish
+    const start = pts[0], end = pts[pts.length - 1];
+    const closure = Math.hypot(start.x - end.x, start.y - end.y);
+    if (closure > 0.35 * Math.max(w, h)) return false;           // not closed
+    let pathLen = 0;
+    for (let i = 1; i < pts.length; i++) {
+      pathLen += Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y);
+    }
+    const expected = Math.PI * ((w + h) / 2);
+    if (pathLen < expected * 0.7 || pathLen > expected * 1.8) return false;
+    return true;
+  }
+
+  function triggerCircleGesture(pts) {
+    // Centroid of the path → world coords → spawn a note there
+    let cx = 0, cy = 0;
+    for (const p of pts) { cx += p.x; cy += p.y; }
+    cx /= pts.length; cy /= pts.length;
+    const w = screenToWorld(cx, cy);
+    pushHistory();
+    const note = {
+      id: nextId(),
+      text: '',
+      image: null,
+      x: w.x - 80, y: w.y - 70,
+      treeX: null, treeY: null,
+      color: DEFAULT_COLOR,
+      tags: [],
+      rotation: (Math.random() - 0.5) * 2,
+      createdAt: Date.now(),
+    };
+    state.notes.set(note.id, note);
+    state.selectedId = note.id;
+    render();
+    save();
+    if (state.mode === 'tree') relayoutTree(true);
+    toast('○ 새 포스트잇');
+  }
+
+  function screenToWorld(sx, sy) {
+    return {
+      x: (sx - state.transform.x) / state.transform.k,
+      y: (sy - 48 - state.transform.y) / state.transform.k,
+    };
+  }
+
+  function findNoteAt(sx, sy, excludeIds) {
+    const w = screenToWorld(sx, sy);
+    const NOTE_W = 160;
+    let hit = null;
+    for (const n of state.notes.values()) {
+      if (excludeIds && excludeIds.has(n.id)) continue;
+      const nx = state.mode === 'tree' ? (n.treeX ?? n.x) : n.x;
+      const ny = state.mode === 'tree' ? (n.treeY ?? n.y) : n.y;
+      const el = document.getElementById(`note-${n.id}`);
+      const h = el ? el.offsetHeight : 140;
+      if (w.x >= nx && w.x <= nx + NOTE_W && w.y >= ny && w.y <= ny + h) {
+        hit = n;
+      }
+    }
+    return hit;
+  }
+
+  function startPinch(cursor, sx, sy) {
+    // Exclude notes already grabbed by the other hand
+    const otherGrabs = new Set();
+    for (const c of handState.cursors.values()) {
+      if (c !== cursor && c.grabbedId) otherGrabs.add(c.grabbedId);
+    }
+    const note = findNoteAt(sx, sy, otherGrabs);
+    if (!note) return;
+    cursor.grabbedId = note.id;
+    cursor.pinchSnapshot = snapshot();
+    state.selectedId = note.id;
+    // Remember world-space origin so the Shift-style fist modifier can lock to it
+    cursor.dragStart = {
+      x: state.mode === 'tree' ? (note.treeX ?? note.x) : note.x,
+      y: state.mode === 'tree' ? (note.treeY ?? note.y) : note.y,
+    };
+    const el = document.getElementById(`note-${note.id}`);
+    if (el) el.classList.add('dragging', 'no-transition');
+    render();
+  }
+
+  function dragGrabbed(cursor, sx, sy) {
+    const note = state.notes.get(cursor.grabbedId);
+    if (!note) return;
+
+    // Pin lock — if the user's LEFT hand is a fist, freeze the note in place.
+    // Lets the right hand wobble (or fully release) without nudging the note,
+    // so the user can drop precisely where they aimed.
+    const pinned = [...handState.cursors.values()]
+      .some(c => c.label === 'Left' && c.kind === 'fist');
+    if (pinned) return;
+
+    const w = screenToWorld(sx, sy);
+    const NOTE_W = 160;
+    const el = document.getElementById(`note-${note.id}`);
+    const h = el ? el.offsetHeight : 140;
+    const nx = w.x - NOTE_W / 2;
+    const ny = w.y - h / 2;
+
+    if (state.mode === 'tree') {
+      note.treeX = nx; note.treeY = ny;
+    } else {
+      note.x = nx; note.y = ny;
+    }
+    if (el) { el.style.left = `${nx}px`; el.style.top = `${ny}px`; }
+    renderEdges();
+  }
+
+  function releasePinch(cursor) {
+    if (!cursor.grabbedId) { cursor.pinchSnapshot = null; cursor.dragStart = null; return; }
+    const el = document.getElementById(`note-${cursor.grabbedId}`);
+    if (el) {
+      el.classList.remove('dragging');
+      setTimeout(() => el && el.classList.remove('no-transition'), 50);
+    }
+    if (cursor.pinchSnapshot) pushHistory(cursor.pinchSnapshot);
+    cursor.pinchSnapshot = null;
+    cursor.grabbedId = null;
+    cursor.dragStart = null;
+    save();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  Image import (drag-and-drop + paste)
+  // ═══════════════════════════════════════════════════════════
+  function imageFileToDataUrl(file, maxDim = 800) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        // GIF / SVG: keep original to preserve animation / vector
+        if (file.type === 'image/gif' || file.type === 'image/svg+xml') {
+          resolve(reader.result); return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          if (scale >= 1) { resolve(reader.result); return; }
+          const c = document.createElement('canvas');
+          c.width = Math.round(img.width * scale);
+          c.height = Math.round(img.height * scale);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addImageFile(file) {
+    try {
+      const dataUrl = await imageFileToDataUrl(file);
+      addNote('', { image: dataUrl });
+    } catch (err) {
+      console.warn(err);
+      toast('이미지 처리 실패');
+    }
+  }
+
+  canvasEl.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer) return;
+    const hasImage = [...e.dataTransfer.items].some(
+      it => it.kind === 'file' && it.type.startsWith('image/')
+    );
+    if (!hasImage) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    canvasEl.classList.add('drop-target');
+  });
+  canvasEl.addEventListener('dragleave', (e) => {
+    if (e.target === canvasEl) canvasEl.classList.remove('drop-target');
+  });
+  canvasEl.addEventListener('drop', async (e) => {
+    canvasEl.classList.remove('drop-target');
+    if (!e.dataTransfer) return;
+    const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+    if (files.length === 0) return;
+    e.preventDefault();
+    for (const file of files) await addImageFile(file);
+  });
+
+  window.addEventListener('paste', async (e) => {
+    // Skip if focus is in a text-editable element AND clipboard has no image
+    // (so normal Cmd-V text paste still works inside notes / chat input)
+    const items = [...(e.clipboardData?.items || [])];
+    const imgItem = items.find(it => it.kind === 'file' && it.type.startsWith('image/'));
+    if (!imgItem) return;
+    e.preventDefault();
+    const file = imgItem.getAsFile();
+    if (file) await addImageFile(file);
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  //  Init
+  // ═══════════════════════════════════════════════════════════
+  applyTransform();
+  load();
+  render();
+  chatInput.focus();
+  </script>
+</body>
+</html>
