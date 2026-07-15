@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Postit Board — idea organizer</title>
+<title>IDEA Orchestrator — idea organizer</title>
 <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="toolbar">
-    <h1>Postit Board</h1>
+    <h1>IDEA Orchestrator</h1>
     <span class="sub">idea organizer</span>
     <div class="seg" id="mode-seg">
       <button data-mode="network" class="active">Network</button>
@@ -31,7 +31,7 @@
       <div id="notes"></div>
     </div>
     <div id="empty-hint">
-      <div class="big">Postit Board</div>
+      <div class="big">IDEA Orchestrator</div>
       <div class="small">
         캔버스 아무 곳이나 클릭 → 바로 입력<br/>
         <kbd>Space</kbd> + 드래그 → 캔버스 이동 ·  휠 → 줌<br/>
@@ -1220,7 +1220,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `postit-board-${todayStamp()}.json`;
+    a.download = `idea-orchestrator-${todayStamp()}.json`;
     a.click();
     URL.revokeObjectURL(url);
     toast('내보냈습니다');

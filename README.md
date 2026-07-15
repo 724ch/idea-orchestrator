@@ -1,9 +1,9 @@
-# Postit Board
+# IDEA Orchestrator
 
 손동작 인터랙션이 들어간 단일 페이지 아이디어 보드.
 
-→ **바로 써보기**: <https://724ch.github.io/postit-tool/>
-→ **케이스 스터디**: <https://724ch.github.io/postit-tool/case-study.html>
+→ **바로 써보기**: <https://724ch.github.io/idea-orchestrator/>
+→ **케이스 스터디**: <https://724ch.github.io/idea-orchestrator/case-study.html>
 
 ## 사용법
 
